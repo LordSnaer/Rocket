@@ -1,0 +1,19 @@
+# colcon-generated; never check in
+build/
+install/
+log/
+
+# editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+__pycache__/
+*.pyc
+*.pyo
+
+# stray colcon output inside src/ (shouldn't happen but just in case)
+src/build/
+src/install/
+src/log/

@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<joint name="laser_joint_front" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser_frame_front"/>
+    <origin xyz="0.172 0 0.2" rpy="0 0 ${180 * pi / 180}"/>   
+</joint>
+
+<link name="laser_frame_front">
+    <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+            <cylinder length="0.05" radius="0.02"/>
+        </geometry>
+        <material name="red"/>
+    </visual>
+</link>
+
+</robot>
