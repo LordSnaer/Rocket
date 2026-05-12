@@ -45,6 +45,7 @@ MAX_TURNS_PER_SEC = 15.0   # well below vel_limit=30, gives margin for hall nois
 MAX_LINEAR_SPEED = 0.2     # m/s, caps vx/vy so wz always has wheel headroom for turning
 MAX_ANGULAR_SPEED = 1.5      # rad/s, clamps yaw rate from /cmd_vel
 CMD_RATE_HZ = 20.0         # max rate to push setpoints onto CAN, regardless of /cmd_vel rate
+CMD_VEL_TIMEOUT = 0.5      # seconds with no /cmd_vel before watchdog stops the wheels
 INVERT = {                # flip sign per wheel if motor spins opposite
     'RR': -1,
     'RL': 1,
@@ -104,6 +105,13 @@ class ODriveCanTest(Node):
         self.joy_sub = self.create_subscription(Joy, '/joy', self.joy_cb, 10)
         self._prev_buttons = []
         self.reader = can.Notifier(self.bus, [self._on_can_msg])
+        # Watchdog: nav2 stops publishing /cmd_vel when a goal is reached;
+        # without this, the last setpoint stays latched and the robot keeps
+        # moving. If no /cmd_vel arrives in CMD_VEL_TIMEOUT seconds, force
+        # all wheels to 0.
+        self._last_cmd_vel_time = self.get_clock().now()
+        self._wd_stopped = True  # don't spam zero-set on first tick
+        self._watchdog = self.create_timer(0.1, self._watchdog_cb)
         self.get_logger().info(f'Listening on /cmd_vel, controlling nodes {list(NODE_IDS.values())} on {CAN_INTERFACE}')
         self.get_logger().info(f'==BUILD MARKER v8 (RR vy flipped)==  INVERT={INVERT}')
 
@@ -174,6 +182,11 @@ class ODriveCanTest(Node):
             subprocess.run(DOCK_CMD, shell=True, check=False)
 
     def cmd_vel_cb(self, msg):
+        # Watchdog timestamp updates on EVERY message — independent of the
+        # rate-limit below — otherwise upstream rates >CMD_RATE_HZ would
+        # have most messages dropped before refreshing the watchdog.
+        self._last_cmd_vel_time = self.get_clock().now()
+        self._wd_stopped = False
         now = self.get_clock().now().nanoseconds / 1e9
         if now - self._last_cmd_send < 1.0 / CMD_RATE_HZ:
             return
@@ -205,6 +218,16 @@ class ODriveCanTest(Node):
                 motor_turns_per_sec = 0.0
             self._prev_motor_cmd[name] = motor_turns_per_sec
             self.set_velocity(NODE_IDS[name], motor_turns_per_sec)
+
+    def _watchdog_cb(self):
+        # If no /cmd_vel for CMD_VEL_TIMEOUT, stop all wheels. We only push
+        # the zero command once per stale period (tracked by _wd_stopped) so
+        # we don't hammer the CAN bus with redundant frames while idle.
+        age = (self.get_clock().now() - self._last_cmd_vel_time).nanoseconds / 1e9
+        if age > CMD_VEL_TIMEOUT and not self._wd_stopped:
+            for nid in NODE_IDS.values():
+                self.set_velocity(nid, 0.0)
+            self._wd_stopped = True
 
     def destroy_node(self):
         try:

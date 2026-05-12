@@ -1,0 +1,18 @@
+<!--
+  Minimal nav2 behavior tree: replan once per second, follow path.
+  No recovery branch — any failure (planner timeout, controller stuck,
+  collision check, etc.) aborts the goal immediately, so the BT does NOT
+  enter the spin/wait/backup loop that worsens stale-goal-stamp problems.
+
+  When this BT aborts, you must re-send the goal in RViz to try again.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <PipelineSequence name="NavigateWithReplanning">
+      <RateController hz="1.0">
+        <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+      </RateController>
+      <FollowPath path="{path}" controller_id="FollowPath"/>
+    </PipelineSequence>
+  </BehaviorTree>
+</root>

@@ -1,10 +1,21 @@
+"""Navigate in an existing (saved) map.
+
+Same as slam.launch.py, except:
+  - slam_toolbox is replaced with localization_launch.py (map_server + AMCL)
+  - takes a `map` arg pointing to the saved .yaml map file
+
+Run with the default map path:
+    ros2 launch articubot_one nav.launch.py
+Or override the map:
+    ros2 launch articubot_one nav.launch.py map:=/home/rocket/maps/my_map.yaml
+"""
 import os
 
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
 from launch.substitutions import LaunchConfiguration, Command
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, RegisterEventHandler, TimerAction
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
@@ -12,17 +23,14 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
 
-    # Check if we're told to use sim time
     use_sim_time = LaunchConfiguration('use_sim_time')
     use_ros2_control = LaunchConfiguration('use_ros2_control')
+    map_yaml = LaunchConfiguration('map')
 
-    # Process the URDF file
     pkg_path = os.path.join(get_package_share_directory('articubot_one'))
-    xacro_file = os.path.join(pkg_path,'description','robot.urdf.xacro')
-    # robot_description_config = xacro.process_file(xacro_file).toxml()
+    xacro_file = os.path.join(pkg_path, 'description', 'robot.urdf.xacro')
     robot_description_config = Command(['xacro ', xacro_file, ' use_ros2_control:=', use_ros2_control, ' sim_mode:=', use_sim_time])
 
-    # Create a robot_state_publisher node
     params = {'robot_description': robot_description_config, 'use_sim_time': use_sim_time}
     node_robot_state_publisher = Node(
         package='robot_state_publisher',
@@ -31,56 +39,60 @@ def generate_launch_description():
         parameters=[params]
     )
 
-    # RPLidar A2M12 front launch
     rplidar_front_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory('rplidar_ros'), 'launch', 'rplidar_a2m12_launch_front.py')
         )
     )
 
-    # RPLidar A2M12 rear launch
     rplidar_rear_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory('rplidar_ros'), 'launch', 'rplidar_a2m12_launch_rear.py')
         )
     )
 
-    # Dual laser merger
     laser_merger_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory('dual_laser_merger'), 'demo_laser_merger.launch.py')
         )
     )
 
-    # slam_toolbox (online async) — uses /merged from the laser merger
-    slam_params_file = os.path.join(pkg_path, 'config', 'mapper_params_online_async.yaml')
-    slam_launch = IncludeLaunchDescription(
+    # Localization (map_server + AMCL) instead of slam_toolbox
+    localization_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(get_package_share_directory('slam_toolbox'), 'launch', 'online_async_launch.py')
+            os.path.join(pkg_path, 'launch', 'localization_launch.py')
         ),
         launch_arguments={
             'use_sim_time': use_sim_time,
-            'slam_params_file': slam_params_file,
+            'map': map_yaml,
         }.items(),
     )
 
-    # nav2 stack (controller, planner, behaviors, BT navigator, lifecycle manager).
-    # navigation_launch.py defaults params_file to articubot_one/config/nav2_params.yaml.
-    # map_subscribe_transient_local must be 'true' or RewrittenYaml overrides
-    # our YAML and the global_costmap can't receive the latched /map message.
-    nav2_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(pkg_path, 'launch', 'navigation_launch.py')
-        ),
-        launch_arguments={
-            'use_sim_time': use_sim_time,
-            'map_subscribe_transient_local': 'true',
-        }.items(),
+    # nav2 stack (same as slam.launch.py)
+    # Wrapped in a TimerAction so localization_launch's lifecycle_manager has
+    # time to fully bring up map_server + amcl before nav2's manager starts.
+    # Without this delay, on a Jetson the two lifecycle_managers race at
+    # startup and one of them (usually localization) deadlocks.
+    #
+    # map_subscribe_transient_local: navigation_launch.py defaults this arg
+    # to 'false', which overrides our YAML via RewrittenYaml. We need 'true'
+    # so the global_costmap's static layer can receive map_server's latched
+    # /map message.
+    nav2_launch = TimerAction(
+        period=10.0,
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(pkg_path, 'launch', 'navigation_launch.py')
+                ),
+                launch_arguments={
+                    'use_sim_time': use_sim_time,
+                    'map_subscribe_transient_local': 'true',
+                }.items(),
+            )
+        ]
     )
 
-    # Bring up can0 at 250 kbps. Non-blocking: if can0 is already UP we skip
-    # sudo entirely; otherwise use `sudo -n` so a missing NOPASSWD rule fails
-    # fast instead of hanging the launch on an invisible password prompt.
     can_setup = ExecuteProcess(
         cmd=['bash', '-c',
              'if ip -br link show can0 2>/dev/null | grep -q "UP"; then '
@@ -93,7 +105,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    # nodes/ is not installed by CMakeLists, so reference the source tree directly
     nodes_dir = '/home/rocket/rocket_ws/src/rocket/nodes'
 
     odrive_can_test = ExecuteProcess(
@@ -106,15 +117,11 @@ def generate_launch_description():
         output='screen'
     )
 
-    # Goal-pose restamp shim: RViz/CLI publishes to /goal_pose_raw, this
-    # republishes to /goal_pose with stamp=0 so nav2's planner uses LATEST
-    # TF instead of the original click time (which ages out of the buffer).
     goal_restamp = ExecuteProcess(
         cmd=['python3', os.path.join(nodes_dir, 'goal_restamp.py')],
         output='screen'
     )
 
-    # Only start CAN-using nodes after can0 is up
     start_can_nodes = RegisterEventHandler(
         OnProcessExit(
             target_action=can_setup,
@@ -143,40 +150,40 @@ def generate_launch_description():
                     'name': 'angle_block_1',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': -0.119467787,  # -6.845 degrees
-                        'upper_angle': 0.119467787    # +6.845 degrees
+                        'lower_angle': -0.119467787,
+                        'upper_angle': 0.119467787
                     }
                 },
                 'filter3': {
                     'name': 'angle_block_2',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': 0.285274,  # +16.346 degrees
-                        'upper_angle': 0.547596   # +31.376 degrees
+                        'lower_angle': 0.285274,
+                        'upper_angle': 0.547596
                     }
                 },
                 'filter4': {
                     'name': 'angle_block_3',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': 2.099282,  # +120.282 degrees
-                        'upper_angle': 2.509085   # +143.760 degrees
+                        'lower_angle': 2.099282,
+                        'upper_angle': 2.509085
                     }
                 },
                 'filter5': {
                     'name': 'angle_block_4',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': -0.547596,  # -31.376 degrees
-                        'upper_angle': -0.285274   # -16.346 degrees
+                        'lower_angle': -0.547596,
+                        'upper_angle': -0.285274
                     }
                 },
                 'filter6': {
                     'name': 'angle_block_5',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': -2.509085,  # -143.760 degrees
-                        'upper_angle': -2.099282   # -120.282 degrees
+                        'lower_angle': -2.509085,
+                        'upper_angle': -2.099282
                     }
                 }
             }],
@@ -207,40 +214,40 @@ def generate_launch_description():
                     'name': 'angle_block_1',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': -0.119467787,  # -6.845 degrees
-                        'upper_angle': 0.119467787    # +6.845 degrees
+                        'lower_angle': -0.119467787,
+                        'upper_angle': 0.119467787
                     }
                 },
                 'filter3': {
                     'name': 'angle_block_2',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': 0.285274,  # +16.346 degrees
-                        'upper_angle': 0.547596   # +31.376 degrees
+                        'lower_angle': 0.285274,
+                        'upper_angle': 0.547596
                     }
                 },
                 'filter4': {
                     'name': 'angle_block_3',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': 2.099282,  # +120.282 degrees
-                        'upper_angle': 2.509085   # +143.760 degrees
+                        'lower_angle': 2.099282,
+                        'upper_angle': 2.509085
                     }
                 },
                 'filter5': {
                     'name': 'angle_block_4',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': -0.547596,  # -31.376 degrees
-                        'upper_angle': -0.285274   # -16.346 degrees
+                        'lower_angle': -0.547596,
+                        'upper_angle': -0.285274
                     }
                 },
                 'filter6': {
                     'name': 'angle_block_5',
                     'type': 'laser_filters/LaserScanAngularBoundsFilterInPlace',
                     'params': {
-                        'lower_angle': -2.509085,  # -143.760 degrees
-                        'upper_angle': -2.099282   # -120.282 degrees
+                        'lower_angle': -2.509085,
+                        'upper_angle': -2.099282
                     }
                 }
             }],
@@ -250,7 +257,6 @@ def generate_launch_description():
         ]
     )
 
-    # Launch!
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim_time',
@@ -260,6 +266,10 @@ def generate_launch_description():
             'use_ros2_control',
             default_value='true',
             description='Use ros2_control if true'),
+        DeclareLaunchArgument(
+            'map',
+            default_value='/home/rocket/maps/my_map.yaml',
+            description='Full path to the saved map .yaml to load'),
 
         node_robot_state_publisher,
         rplidar_front_launch,
@@ -267,7 +277,7 @@ def generate_launch_description():
         laser_filter_front,
         laser_filter_rear,
         laser_merger_launch,
-        slam_launch,
+        localization_launch,
         nav2_launch,
         goal_restamp,
         can_setup,
