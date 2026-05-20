@@ -24,22 +24,6 @@ NODE_IDS = {
 CAN_INTERFACE = 'can0' # Number on Can Network
 
 WHEEL_RADIUS = 0.0635      # meters — TODO: set to your wheel radius
-WHEELBASE = 0.25          # meters — front-axle to rear-axle distance
-
-Beta0 = math.pi/2          # meters — angle between forward direction and the normal to the wheel front left
-Beta1 = -math.pi/2         # meters — angle between forward direction and the normal to the wheel front right
-Beta2 = math.pi/2          # meters — angle between forward direction and the normal to the wheel rear left
-Beta3 = -math.pi/2         # meters — angle between forward direction and the normal to the wheel rear right
-
-Gamma0 = math.pi/4          # radians — Helix angle of the wheel front left
-Gamma1 = -math.pi/4         # radians — Helix angle of the wheel front right
-Gamma2 = math.pi/4          # radians — Helix angle of the wheel rear left
-Gamma3 = -math.pi/4         # radians — Helix angle of the wheel rear right
-
-Alpha0 = 0.939              # angle betwwen wheel placement vector and forward direction vector
-Alpha1 = -0.939             # angle betwwen wheel placement vector and forward direction vector
-Alpha2 = math.pi - 0.939  # angle betwwen wheel placement vector and forward direction vector
-Alpha3 = math.pi + 0.939  # angle betwwen wheel placement vector and forward direction vector
 GEAR_RATIO = 20.0          # motor turns per wheel turn
 MAX_TURNS_PER_SEC = 15.0   # well below vel_limit=30, gives margin for hall noise
 MAX_LINEAR_SPEED = 0.2     # m/s, caps vx/vy so wz always has wheel headroom for turning
@@ -99,7 +83,6 @@ class ODriveCanTest(Node):
         self.bus = can.interface.Bus(channel=CAN_INTERFACE, interface='socketcan')
         self._last_rearm = {nid: 0.0 for nid in NODE_IDS.values()}
         self._last_cmd_send = 0.0
-        self._prev_motor_cmd = {name: 0.0 for name in NODE_IDS}
         self.arm_all()
         self.sub = self.create_subscription(Twist, '/cmd_vel', self.cmd_vel_cb, 10)
         self.joy_sub = self.create_subscription(Joy, '/joy', self.joy_cb, 10)
@@ -197,8 +180,6 @@ class ODriveCanTest(Node):
         wz = max(-MAX_ANGULAR_SPEED, min(MAX_ANGULAR_SPEED, msg.angular.z))
 
         L = (0.295/2) + (0.4038/2)
-        k = 0
-
 
         wheel_linear = {
             'FL': (1/WHEEL_RADIUS) * (vx - vy - L*wz),
@@ -216,13 +197,9 @@ class ODriveCanTest(Node):
             # hall encoder around zero and trigger spurious direction flips.
             if abs(motor_turns_per_sec) < 0.5:
                 motor_turns_per_sec = 0.0
-            self._prev_motor_cmd[name] = motor_turns_per_sec
             self.set_velocity(NODE_IDS[name], motor_turns_per_sec)
 
     def _watchdog_cb(self):
-        # If no /cmd_vel for CMD_VEL_TIMEOUT, stop all wheels. We only push
-        # the zero command once per stale period (tracked by _wd_stopped) so
-        # we don't hammer the CAN bus with redundant frames while idle.
         age = (self.get_clock().now() - self._last_cmd_vel_time).nanoseconds / 1e9
         if age > CMD_VEL_TIMEOUT and not self._wd_stopped:
             for nid in NODE_IDS.values():

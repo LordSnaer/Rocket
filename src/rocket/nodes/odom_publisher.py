@@ -78,17 +78,22 @@ class OdomPublisher(Node):
     def _on_can_msg(self, msg):
         cmd_id = msg.arbitration_id & 0x1F
         node_id = msg.arbitration_id >> 5
+
+        #reject every message except for command ids for velocity and position. a requirement is also that the message is 8 bytes
         if cmd_id != CMD_GET_ENCODER_ESTIMATES:
             return
         if len(msg.data) < 8:
             return
-        # Find which wheel this is.
+        
+        # Find which wheel this is by matching the node id by the NODE_IDS dict. ignore if not from these node ids
         name = next((n for n, nid in NODE_IDS.items() if nid == node_id), None)
         if name is None:
             return
         # bytes 0-3: position (turns at the motor shaft)
         # bytes 4-7: velocity (turns/sec at the motor shaft)
+        # multiplied by two because the ODrive config uses a 4 pole paired motor meanwhile the motor is actually a 2 pole paired.
         motor_turns_per_sec = struct.unpack('<f', bytes(msg.data[4:8]))[0] * 2.0
+
         # Undo INVERT to get the wheel's natural-convention spin direction,
         # then convert motor turns/sec → wheel rad/s.
         wheel_turns_per_sec = motor_turns_per_sec * INVERT[name] / GEAR_RATIO
@@ -129,6 +134,7 @@ class OdomPublisher(Node):
         if dt <= 0.0:
             return
 
+        # calls for the function which calculates the robots velocities
         vx, vy, wz = self.compute_odometry_velocity(self.wheel_omega)
 
         # Integrate body-frame velocity into the world frame.
@@ -137,6 +143,7 @@ class OdomPublisher(Node):
         self.x += (vx * cos_t - vy * sin_t) * dt
         self.y += (vx * sin_t + vy * cos_t) * dt
         self.theta += wz * dt
+        
         # Wrap theta into (-pi, pi)
         self.theta = math.atan2(math.sin(self.theta), math.cos(self.theta))
 

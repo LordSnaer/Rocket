@@ -1,10 +1,9 @@
 <!--
-  Minimal nav2 behavior tree: replan once per second, follow path.
-  No recovery branch — any failure (planner timeout, controller stuck,
-  collision check, etc.) aborts the goal immediately, so the BT does NOT
-  enter the spin/wait/backup loop that worsens stale-goal-stamp problems.
-
-  When this BT aborts, you must re-send the goal in RViz to try again.
+  Route-server-augmented nav2 behavior tree.
+  ComputeAndTrackRoute plans a sparse path through the route graph (Jazzy-style
+  Route Server backported on Humble), then FollowPath drives the controller.
+  No recovery branch: any failure aborts the goal so a stale goal does not get
+  retried into the spin/wait/backup loop.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
